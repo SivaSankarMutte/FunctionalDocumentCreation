@@ -2,10 +2,8 @@ streamlit
 langchain
 langchain-community
 langchain-core
-langchain-chroma
 langchain-groq
 langchain-openai
-chromadb
 sentence-transformers
 pandas
 python-dotenv
@@ -16,3 +14,4 @@ pytesseract
 openpyxl
 onnxruntime
 langchain-huggingface
+faiss-cpu

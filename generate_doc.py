@@ -1,7 +1,6 @@
 import sys, traceback
 sys.excepthook = lambda exctype, value, tb: traceback.print_exception(exctype, value, tb)
 
-
 import os
 import io
 import re
@@ -9,6 +8,7 @@ import zipfile
 import hashlib
 from pathlib import Path
 from typing import List, Tuple
+import streamlit as st
 
 from dotenv import load_dotenv
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -17,27 +17,18 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_chroma import Chroma
+from langchain_community.vectorstores import FAISS  # ⬅️ FAISS instead of Chroma
 
 from docx import Document as DocxDocument
 
-# ---------- Config (for Local) ----------
-# load_dotenv()
-# EMBED_MODEL = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
-# LLM_MODEL = os.getenv("LLM_MODEL")  # optional; choose based on provider
-# PERSIST_DIR = os.getenv("PERSIST_DIR", "./code_index")
-# CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1200"))
-# CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "200"))
-
 # ---------- Config (for Streamlit) ----------
 EMBED_MODEL = st.secrets.get("EMBED_MODEL", "sentence-transformers/paraphrase-MiniLM-L3-v2")
-LLM_MODEL = st.secrets.get("LLM_MODEL", None)  # optional; choose based on provider
-PERSIST_DIR = st.secrets.get("PERSIST_DIR", "./code_index")
+LLM_MODEL = st.secrets.get("LLM_MODEL", None)
 CHUNK_SIZE = int(st.secrets.get("CHUNK_SIZE", 1200))
 CHUNK_OVERLAP = int(st.secrets.get("CHUNK_OVERLAP", 200))
 
-MAX_FILE_SIZE_MB = 2.5  # skip very large single files
-MAX_DOCS = 5000  # safety cap
+MAX_FILE_SIZE_MB = 2.5
+MAX_DOCS = 5000
 
 IGNORES = [
     r"/\.git/", r"/\.hg/", r"/\.svn/",
@@ -93,11 +84,11 @@ def read_file(path: str) -> str:
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as f:
             return f.read()
-    except Exception as e:
+    except Exception:
         return ""
 
-# ---------- Build Index ----------
-def build_index_from_folder(folder: str) -> Chroma:
+# ---------- Build Index (FAISS) ----------
+def build_index_from_folder(folder: str) -> FAISS:
     files = collect_code_files(folder)
     if not files:
         raise ValueError("No code files found to index.")
@@ -116,31 +107,14 @@ def build_index_from_folder(folder: str) -> Chroma:
     chunks = splitter.split_documents(docs)
 
     embeddings = HuggingFaceEmbeddings(model_name=EMBED_MODEL, model_kwargs={"device":"cpu"})
-    vs = Chroma.from_documents(chunks, embedding=embeddings, persist_directory=PERSIST_DIR)
+    vs = FAISS.from_documents(chunks, embedding=embeddings)  # ⬅️ No persist_directory
     return vs
 
-def load_or_build_index(zip_bytes: bytes, workdir: str) -> Chroma:
+def load_or_build_index(zip_bytes: bytes, workdir: str) -> FAISS:
     project_root = extract_zip_to_temp(zip_bytes, os.path.join(workdir, "repo"))
-    # Always rebuild for this demo to capture the uploaded repo
-    if os.path.exists(PERSIST_DIR):
-        # clear old index
-        for f in os.listdir(PERSIST_DIR):
-            fp = os.path.join(PERSIST_DIR, f)
-            if os.path.isdir(fp):
-                import shutil; shutil.rmtree(fp, ignore_errors=True)
-            else:
-                os.remove(fp)
-    return build_index_from_folder(project_root)
+    return build_index_from_folder(project_root)  # Always rebuild in Streamlit Cloud
 
-# ---------- LLM (for Local) ----------
-# def get_llm():
-#     if os.getenv("GROQ_API_KEY"):
-#         return ChatGroq(model_name=LLM_MODEL or "llama3-70b-8192", temperature=0.2)
-#     if os.getenv("OPENAI_API_KEY"):
-#         return ChatOpenAI(model=LLM_MODEL or "gpt-4o-mini", temperature=0.2)
-#     raise RuntimeError("Please set GROQ_API_KEY or OPENAI_API_KEY.")
-
-# ---------- LLM (for Streamlit) ----------
+# ---------- LLM ----------
 def get_llm():
     if st.secrets.get("GROQ_API_KEY"):
         return ChatGroq(model_name=LLM_MODEL or "llama3-70b-8192", temperature=0.2)
@@ -185,9 +159,8 @@ Be concise, structured, and avoid guessing. Cite file paths where relevant.
 # Answer
 """
     )
-    # Pull top-k chunks for the section
     docs = retriever.get_relevant_documents(question)
-    context = "\n\n---\n\n".join([f"[{d.metadata.get('source','?')}]\\n{d.page_content[:2000]}" for d in docs])
+    context = "\n\n---\n\n".join([f"[{d.metadata.get('source','?')}]\n{d.page_content[:2000]}" for d in docs])
     chain = prompt | llm
     ans = chain.invoke({"question": question, "context": context}).content
     return f"## {title}\n\n{ans.strip()}\n"
@@ -198,7 +171,6 @@ def generate_functional_doc(zip_bytes: bytes, workdir: str = "./work") -> Tuple[
     retriever = vs.as_retriever(search_kwargs={"k": 12})
     llm = get_llm()
 
-    # Build markdown
     md_parts = ["# Functional Documentation\n"]
     for title, q in SECTION_QUERIES:
         md_parts.append(generate_section(llm, retriever, title, q))
@@ -210,17 +182,16 @@ def generate_functional_doc(zip_bytes: bytes, workdir: str = "./work") -> Tuple[
     with open(md_path, "w", encoding="utf-8") as f:
         f.write(md)
 
-    # Also write DOCX
+    # DOCX output
     doc = DocxDocument()
     doc.add_heading("Functional Documentation", level=0)
     for title, _ in SECTION_QUERIES:
-        # Extract section content
         marker = f"## {title}"
         start = md.find(marker)
         end = md.find("## ", start + 3) if start != -1 else -1
         section_text = md[start:end].replace(marker, title).strip() if start != -1 else ""
         doc.add_heading(title, level=1)
-        for para in section_text.split("\\n\\n"):
+        for para in section_text.split("\n\n"):
             if para.strip():
                 doc.add_paragraph(para)
     docx_path = os.path.join(out_dir, "functional_doc.docx")

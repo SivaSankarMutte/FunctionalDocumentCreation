@@ -1,26 +1,39 @@
-import os
-import io
 import streamlit as st
-from dotenv import load_dotenv
 from generate_doc import generate_functional_doc
 
-st.set_page_config(page_title="Source → Functional Doc (GenAI)", layout="wide")
-st.title("📘 Source → Functional Doc (GenAI)")
+st.set_page_config(page_title="Functional Doc Generator", page_icon="📄", layout="wide")
 
-with st.expander("⚙️ Configuration", expanded=False):
-    st.write("Set API keys in environment or Streamlit secrets.")
-    st.code("GROQ_API_KEY or OPENAI_API_KEY", language="bash")
+st.title("📄 Functional Documentation Generator")
+st.write("Upload a ZIP of your codebase to generate a functional documentation report.")
 
-uploaded = st.file_uploader("Upload a ZIP of your project repository", type=["zip"])
+uploaded_file = st.file_uploader("Upload ZIP file", type=["zip"])
 
-if st.button("Generate Documentation", disabled=not uploaded):
-    with st.spinner("Indexing code and generating documentation..."):
-        zip_bytes = uploaded.read()
-        md_path, docx_path = generate_functional_doc(zip_bytes, workdir="./work")
-    st.success("Done!")
-    st.download_button("⬇️ Download Markdown", data=open(md_path,"rb").read(), file_name="functional_doc.md")
-    st.download_button("⬇️ Download Word (.docx)", data=open(docx_path,"rb").read(), file_name="functional_doc.docx")
+if uploaded_file is not None:
+    with st.spinner("Generating documentation... This may take a few minutes."):
+        try:
+            md_path, docx_path = generate_functional_doc(uploaded_file.read(), workdir="./work")
 
-st.markdown("---")
-st.caption("Tip: Add a README to your repo; it improves the overview section.")
+            # Download buttons
+            with open(md_path, "r", encoding="utf-8") as f:
+                md_content = f.read()
+            st.download_button(
+                "⬇️ Download as Markdown",
+                md_content,
+                file_name="functional_doc.md",
+                mime="text/markdown"
+            )
 
+            with open(docx_path, "rb") as f:
+                st.download_button(
+                    "⬇️ Download as DOCX",
+                    f,
+                    file_name="functional_doc.docx",
+                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                )
+
+            # Preview in Streamlit
+            st.subheader("📖 Documentation Preview")
+            st.markdown(md_content)
+
+        except Exception as e:
+            st.error(f"Error: {e}")
